@@ -1,0 +1,48 @@
+{
+  "name": "claude-remote-bridge",
+  "version": "1.0.0",
+  "description": "Control Claude Code sessions remotely via Telegram. Approve/deny tool usage and send instructions from your phone.",
+  "type": "module",
+  "main": "src/server.js",
+  "bin": {
+    "claude-remote-bridge": "./bin/cli.js"
+  },
+  "scripts": {
+    "start": "node bin/cli.js start",
+    "setup": "node bin/cli.js setup",
+    "test:connection": "node bin/cli.js test"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "remote",
+    "telegram",
+    "hooks",
+    "automation",
+    "approval",
+    "mobile"
+  ],
+  "author": "Marcio Vicente",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/marciovicente/claude-remote-bridge.git"
+  },
+  "homepage": "https://github.com/marciovicente/claude-remote-bridge",
+  "bugs": {
+    "url": "https://github.com/marciovicente/claude-remote-bridge/issues"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "express": "^4.21.0",
+    "nanoid": "^5.0.7",
+    "telegraf": "^4.16.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.2"
+  }
+}
