@@ -83,6 +83,10 @@ When Claude tries to use a tool that requires approval, you receive a message wi
 - **❌** — deny the tool call
 - **👁** — view full tool input details
 
+<p align="center">
+  <img src="screen-telegram-bot.png" alt="Telegram bot approval buttons" width="360" />
+</p>
+
 ## Smart Approval Rules
 
 ### Auto-Approve (safe tools)
