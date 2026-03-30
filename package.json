@@ -10,6 +10,8 @@
   "scripts": {
     "start": "node bin/cli.js start",
     "setup": "node bin/cli.js setup",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "test:connection": "node bin/cli.js test"
   },
   "keywords": [
@@ -43,6 +45,6 @@
     "node": ">=18.0.0"
   },
   "devDependencies": {
-    "vitest": "^4.1.2"
+    "vitest": "^2.1.9"
   }
 }

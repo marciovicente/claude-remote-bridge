@@ -62,16 +62,35 @@ export async function startServer() {
       });
     }
 
-    // Check if tool input matches always-deny patterns
-    const inputStr = JSON.stringify(tool_input);
-    for (const pattern of config.approval.alwaysDenyPatterns) {
-      if (inputStr.includes(pattern)) {
-        console.log(`  ❌ Auto-denied (matches pattern: ${pattern})`);
+    // Bash-specific rules: check command against allowed/denied lists
+    if (tool_name === 'Bash' && tool_input?.command) {
+      const cmd = tool_input.command.trim();
+
+      // Check denied patterns first (highest priority)
+      for (const pattern of config.approval.deniedBashPatterns) {
+        if (cmd.includes(pattern)) {
+          console.log(`  ❌ Auto-denied (matches pattern: "${pattern}")`);
+          return res.json({
+            hookSpecificOutput: {
+              hookEventName: 'PreToolUse',
+              permissionDecision: 'deny',
+              permissionDecisionReason: `Blocked by safety rule: "${pattern}"`,
+            },
+          });
+        }
+      }
+
+      // Check if command starts with an allowed prefix
+      const isAllowed = config.approval.allowedBashCommands.some(
+        (prefix) => cmd === prefix || cmd.startsWith(prefix + ' ')
+      );
+      if (isAllowed) {
+        console.log(`  ✅ Auto-approved (safe command: ${cmd.slice(0, 40)})`);
         return res.json({
           hookSpecificOutput: {
             hookEventName: 'PreToolUse',
-            permissionDecision: 'deny',
-            permissionDecisionReason: `Blocked by safety rule: "${pattern}"`,
+            permissionDecision: 'allow',
+            permissionDecisionReason: 'Auto-approved (safe bash command)',
           },
         });
       }
@@ -252,7 +271,7 @@ export async function startServer() {
   // Graceful shutdown
   const shutdown = () => {
     console.log('\n🛑 Shutting down...');
-    if (caffeinate) caffeinate.kill();
+    if (sleepInhibitor) sleepInhibitor.kill();
     telegram.stop();
     server.close();
     process.exit(0);

@@ -18,7 +18,23 @@ const DEFAULT_CONFIG = {
     timeoutSeconds: 300,
     fallbackAction: 'ask', // 'ask' = show in terminal, 'allow' = auto-approve, 'deny' = auto-deny
     autoApproveTools: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'TodoWrite'],
-    alwaysDenyPatterns: ['rm -rf /', 'git push --force origin main', 'git push --force origin master'],
+    allowedBashCommands: [
+      'ls', 'find', 'grep', 'rg', 'cat', 'head', 'tail', 'wc',
+      'cd', 'pwd', 'echo', 'printf',
+      'git status', 'git log', 'git diff', 'git grep', 'git show', 'git branch',
+      'node --version', 'npm --version', 'npx vitest',
+    ],
+    deniedBashPatterns: [
+      'rm -rf /',
+      'git push --force',
+      'git push -f',
+      'git reset --hard',
+      'git clean -f',
+      '> /dev/sda',
+      'mkfs.',
+      'dd if=',
+      ':(){:|:&};:',
+    ],
   },
 };
 
