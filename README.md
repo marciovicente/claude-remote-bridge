@@ -1,20 +1,20 @@
 <p align="left">
-  <img src="claude-remote-bridge-banner.png" alt="Claude Remote Bridge" width="40%" />
+  <img src="claude-remote-bridge-banner.png" alt="Claude Remote Bridge" width="60%" />
 </p>
 
 # Claude Remote Bridge
 
-A Claude Code channel plugin for Telegram with smart approval rules. Control Claude remotely from your phone — approve or deny tool usage with inline buttons, auto-approve safe tools, and send instructions directly from Telegram.
+Control Claude Code remotely from Telegram with smart approval rules. Approve or deny tool usage with inline buttons, auto-approve safe tools, auto-deny dangerous commands, and send instructions directly from your phone.
 
 ## How It Works
 
 ```
-Claude Code <--stdio--> Remote Bridge <--Bot API--> Telegram <--> Your Phone
+Claude Code --HTTP hooks--> Bridge Server (localhost:3456) --Bot API--> Telegram <--> Your Phone
 ```
 
-Remote Bridge runs as an MCP server that Claude Code spawns as a subprocess. It connects to your Telegram bot using long polling (outbound only, no tunnel needed). When Claude needs to use a tool that requires permission, the request appears in your Telegram chat with Approve/Deny buttons.
+Remote Bridge runs as a local HTTP server that integrates with Claude Code via **hooks** (configured in `~/.claude/settings.json`). Before Claude executes risky tools (Bash, Edit, Write, NotebookEdit), the hook sends the request to the bridge server, which applies smart approval rules or forwards it to your Telegram bot with Approve/Deny buttons. The Telegram bot uses long polling (outbound only, no tunnel needed).
 
-Unlike the built-in Telegram channel, Remote Bridge adds **smart approval rules**:
+**Smart approval rules:**
 - Read-only tools (Read, Glob, Grep) are auto-approved without bothering you
 - Dangerous commands are auto-denied based on configurable patterns
 - Temporary bulk approval mode (`/approveall`) for when you trust the flow
@@ -23,50 +23,55 @@ Unlike the built-in Telegram channel, Remote Bridge adds **smart approval rules*
 
 ### Prerequisites
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) v2.1.80 or later
-- [Bun](https://bun.sh) runtime installed
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+- [Node.js](https://nodejs.org) 18+ or [Bun](https://bun.sh)
 - A Telegram account (free)
 
 ### Install
 
 ```bash
-# Clone and install globally
 git clone https://github.com/marciovicente/claude-remote-bridge.git
 cd claude-remote-bridge
-bun install
-bun link
+npm install && npm link
+# or: bun install && bun link
 ```
 
 ### Setup and Start
 
 ```bash
-# Interactive setup — creates a Telegram bot and saves the token
-remote-bridge setup
+# Interactive setup — creates a Telegram bot and installs Claude Code hooks
+claude-remote-bridge setup
 
-# Start Claude Code with the bridge
-remote-bridge start
+# Start the bridge server
+claude-remote-bridge start
 ```
 
-That's it. The `setup` command walks you through creating a Telegram bot via [@BotFather](https://t.me/BotFather) and tests the connection. The `start` command launches Claude Code with the channel enabled.
-
-On first use, send a message to your bot in Telegram. It replies with a pairing code — approve it in your Claude Code session to link your account.
+That's it. The `setup` command walks you through creating a Telegram bot via [@BotFather](https://t.me/BotFather), saves the token, and installs the necessary hooks in Claude Code. The `start` command launches the bridge server — from that point, any Claude Code session on your machine will route approval requests through Telegram.
 
 ### CLI Commands
 
 ```bash
-remote-bridge setup    # Interactive setup (create bot, save token)
-remote-bridge start    # Start Claude Code with the bridge channel
-remote-bridge status   # Show configuration status
+claude-remote-bridge setup            # Interactive setup (create bot, install hooks)
+claude-remote-bridge start            # Start the bridge server
+claude-remote-bridge start -d         # Start in background (detached mode)
+claude-remote-bridge stop             # Stop the background bridge server
+claude-remote-bridge status           # Show bridge status and configuration
+claude-remote-bridge test             # Send a test message to Telegram
+claude-remote-bridge hooks-install    # Install Claude Code hooks (without full setup)
+claude-remote-bridge hooks-uninstall  # Remove Claude Code hooks
 ```
 
 ## Telegram Commands
 
 | Command | Description |
 |---------|-------------|
-| Send any message | Claude receives it as an instruction and acts on it |
+| Send any message | Forward as instruction to Claude (via `/run`) |
+| `/run <instruction>` | Start a new Claude session with the given instruction |
 | `/approveall [min]` | Auto-approve all requests for N minutes (default: 30) |
 | `/stopapprove` | Disable auto-approve mode |
 | `/pause` | Toggle pause — permissions fall back to terminal |
+| `/cancel` | Cancel the current `/run` session |
+| `/stop` | Stop the running Claude process |
 | `/status` | Show bridge status (pending requests, auto-approve, etc.) |
 | `/help` | Show available commands |
 
@@ -98,56 +103,48 @@ Tool inputs matching these patterns are blocked automatically:
 
 ### Customization
 
-Edit `~/.claude/channels/remote-bridge/config.json`:
+Edit `~/.claude-remote-bridge/config.json`:
 
 ```json
 {
-  "autoApproveTools": ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite"],
-  "alwaysDenyPatterns": ["rm -rf /", "git push --force origin main"]
+  "approval": {
+    "timeoutSeconds": 300,
+    "autoApproveTools": ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite"],
+    "alwaysDenyPatterns": ["rm -rf /", "git push --force origin main", "git push --force origin master"]
+  }
 }
 ```
 
-## How It Compares
-
-| Feature | Built-in Telegram Channel | Remote Bridge |
-|---------|--------------------------|---------------|
-| Send messages to Claude | Yes | Yes |
-| Claude replies in Telegram | Yes | Yes |
-| Permission relay (approve/deny) | Text-based ("yes abcde") | Inline buttons |
-| Auto-approve safe tools | No | Yes |
-| Auto-deny dangerous commands | No | Yes |
-| Temporary bulk approval | No | `/approveall` |
-| Pause mode | No | `/pause` |
-
 ## Architecture
 
-Remote Bridge is a standard MCP server with the `claude/channel` and `claude/channel/permission` capabilities. Claude Code spawns it as a subprocess and communicates over stdio.
+Remote Bridge is a local Express server that integrates with Claude Code via HTTP hooks:
 
-- **Channel events**: Telegram messages are pushed to Claude via `notifications/claude/channel`
-- **Reply tool**: Claude sends responses back to Telegram via the `reply` MCP tool
-- **Permission relay**: Claude Code forwards tool approval prompts; the bridge applies rules or forwards to Telegram with buttons
+- **PreToolUse hook**: Intercepts risky tool calls (Bash, Edit, Write, NotebookEdit) and routes them through smart approval rules or Telegram
+- **Notification hook**: Forwards Claude notifications to Telegram (async)
+- **Stop hook**: Notifies Telegram when a Claude session finishes (async)
 
-No HTTP server, no hooks to install, no separate process to manage.
+The hooks are installed in `~/.claude/settings.json` and point to `http://127.0.0.1:3456`. The HTTP connection is held open until the user responds via Telegram buttons (up to 300s timeout).
 
 ## Security
 
-- The Telegram bot only responds to paired users (sender allowlist)
-- Bot token is stored locally in `~/.claude/channels/remote-bridge/.env`
+- The Telegram bot only responds to the configured chat ID
+- Bot token and config are stored locally in `~/.claude-remote-bridge/config.json`
 - All communication is outbound (long polling) — nothing is exposed to the network
+- The bridge server only listens on `127.0.0.1` (localhost)
 
 ## Troubleshooting
 
 **Bot doesn't respond to messages:**
-- Make sure Claude Code is running with `--channels plugin:remote-bridge@...`
-- The bot only works while the channel is active
+- Make sure the bridge server is running (`claude-remote-bridge status`)
+- The bot only works while the bridge server is active
 
 **Permission prompts not appearing:**
-- Check you've paired your account (`/remote-bridge:access list`)
-- Check the bridge isn't paused (`/status`)
+- Check hooks are installed (`claude-remote-bridge status`)
+- Check the bridge isn't paused (`/status` in Telegram)
 
 **Auto-approve not working:**
 - Verify the tool name matches exactly (case-sensitive)
-- Check `~/.claude/channels/remote-bridge/config.json`
+- Check `~/.claude-remote-bridge/config.json`
 
 ## License
 
