@@ -7,6 +7,15 @@
   "bin": {
     "claude-remote-bridge": "./bin/cli.js"
   },
+  "files": [
+    "bin/",
+    "src/*.js",
+    "!src/*.test.js",
+    "setup/",
+    "LICENSE",
+    "README.md",
+    "CLAUDE.md"
+  ],
   "scripts": {
     "start": "node bin/cli.js start",
     "setup": "node bin/cli.js setup",
