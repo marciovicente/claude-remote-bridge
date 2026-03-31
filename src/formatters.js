@@ -1,6 +1,6 @@
 /**
  * Format tool usage details into readable Telegram messages.
- * Uses Telegram MarkdownV2 formatting.
+ * Uses Telegram HTML formatting (more reliable than MarkdownV2).
  */
 
 const TOOL_ICONS = {
@@ -17,10 +17,15 @@ const TOOL_ICONS = {
   default: '🔧',
 };
 
-function escapeMarkdown(text) {
+// Assign a colored circle to each session based on session_id hash
+const SESSION_COLORS = ['🔵', '🟢', '🟡', '🟠', '🟣', '🔴', '⚪'];
+
+function escapeHtml(text) {
   if (!text) return '';
-  // Telegram MarkdownV2 requires escaping these characters
-  return text.replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function truncate(str, maxLen = 300) {
@@ -29,58 +34,97 @@ function truncate(str, maxLen = 300) {
   return str.slice(0, maxLen) + '...';
 }
 
+function sessionColor(sessionId) {
+  if (!sessionId) return '⚪';
+  const hash = [...sessionId].reduce((acc, c) => acc + c.charCodeAt(0), 0);
+  return SESSION_COLORS[hash % SESSION_COLORS.length];
+}
+
+function projectName(cwd) {
+  if (!cwd) return '';
+  return cwd.split('/').pop();
+}
+
 /**
- * Format a tool request into a clean Telegram message.
- * Focuses on the actual content — what command, what file, what change.
+ * Format session tag: colored dot + project folder
+ */
+function sessionTag(sessionId, cwd) {
+  const color = sessionColor(sessionId);
+  const project = projectName(cwd);
+  if (!project) return '';
+  return `${color} <code>${escapeHtml(project)}</code>`;
+}
+
+/**
+ * Compact one-liner summary for post-decision display.
+ */
+export function formatCompactSummary({ toolName, toolInput, cwd }) {
+  const icon = TOOL_ICONS[toolName] || TOOL_ICONS.default;
+  const project = projectName(cwd);
+  const projectTag = project ? ` <code>${escapeHtml(project)}</code>` : '';
+
+  if (toolName === 'Bash' && toolInput?.command) {
+    const cmd = truncate(toolInput.command.split('\n')[0], 60);
+    return `${icon} <code>${escapeHtml(cmd)}</code>${projectTag}`;
+  }
+  if ((toolName === 'Edit' || toolName === 'Write') && toolInput?.file_path) {
+    const filename = toolInput.file_path.split('/').pop();
+    return `${icon} <code>${escapeHtml(filename)}</code>${projectTag}`;
+  }
+  if (toolName === 'NotebookEdit' && toolInput?.notebook_path) {
+    const filename = toolInput.notebook_path.split('/').pop();
+    return `${icon} <code>${escapeHtml(filename)}</code>${projectTag}`;
+  }
+  return `${icon} ${escapeHtml(toolName)}${projectTag}`;
+}
+
+/**
+ * Format a tool request into a Telegram message with full context.
  */
 export function formatToolRequest({ id, toolName, toolInput, sessionId, cwd }) {
   const icon = TOOL_ICONS[toolName] || TOOL_ICONS.default;
+  const tag = sessionTag(sessionId, cwd);
   const lines = [];
 
   if (toolName === 'Bash' && toolInput?.command) {
-    lines.push(`${icon} *Bash*`);
-    lines.push(`\`\`\`bash`);
-    lines.push(escapeMarkdown(truncate(toolInput.command, 500)));
-    lines.push(`\`\`\``);
-  } else if ((toolName === 'Edit') && toolInput?.file_path) {
+    lines.push(`${icon} <b>Bash</b>`);
+    lines.push(`<pre><code class="language-bash">${escapeHtml(truncate(toolInput.command, 500))}</code></pre>`);
+  } else if (toolName === 'Edit' && toolInput?.file_path) {
     const filename = toolInput.file_path.split('/').pop();
-    lines.push(`${icon} *Edit* \`${escapeMarkdown(filename)}\``);
+    lines.push(`${icon} <b>Edit</b> <code>${escapeHtml(filename)}</code>`);
     if (toolInput.old_string && toolInput.new_string) {
-      lines.push(`\`\`\`diff`);
+      const diffLines = [];
       const oldLines = toolInput.old_string.split('\n');
       const newLines = toolInput.new_string.split('\n');
       for (const line of oldLines.slice(0, 15)) {
-        lines.push(escapeMarkdown(`- ${line}`));
+        diffLines.push(`- ${line}`);
       }
-      if (oldLines.length > 15) lines.push(escapeMarkdown(`... +${oldLines.length - 15} more`));
+      if (oldLines.length > 15) diffLines.push(`... +${oldLines.length - 15} more`);
       for (const line of newLines.slice(0, 15)) {
-        lines.push(escapeMarkdown(`+ ${line}`));
+        diffLines.push(`+ ${line}`);
       }
-      if (newLines.length > 15) lines.push(escapeMarkdown(`... +${newLines.length - 15} more`));
-      lines.push(`\`\`\``);
+      if (newLines.length > 15) diffLines.push(`... +${newLines.length - 15} more`);
+      lines.push(`<pre><code class="language-diff">${escapeHtml(diffLines.join('\n'))}</code></pre>`);
     }
   } else if (toolName === 'Write' && toolInput?.file_path) {
     const filename = toolInput.file_path.split('/').pop();
     const lineCount = toolInput.content ? toolInput.content.split('\n').length : 0;
-    lines.push(`${icon} *Write* \`${escapeMarkdown(filename)}\` \\(${lineCount} lines\\)`);
+    lines.push(`${icon} <b>Write</b> <code>${escapeHtml(filename)}</code> (${lineCount} lines)`);
   } else if (toolName === 'NotebookEdit' && toolInput?.notebook_path) {
     const filename = toolInput.notebook_path.split('/').pop();
-    lines.push(`${icon} *NotebookEdit* \`${escapeMarkdown(filename)}\``);
+    lines.push(`${icon} <b>NotebookEdit</b> <code>${escapeHtml(filename)}</code>`);
   } else {
-    lines.push(`${icon} *${escapeMarkdown(toolName)}*`);
+    lines.push(`${icon} <b>${escapeHtml(toolName)}</b>`);
     const keys = Object.keys(toolInput || {}).slice(0, 2);
     for (const key of keys) {
       const val = typeof toolInput[key] === 'string'
         ? truncate(toolInput[key], 100)
         : JSON.stringify(toolInput[key]).slice(0, 100);
-      lines.push(`\`${escapeMarkdown(val)}\``);
+      lines.push(`<code>${escapeHtml(val)}</code>`);
     }
   }
 
-  if (cwd) {
-    const folder = cwd.split('/').pop();
-    lines.push(`📂 \`${escapeMarkdown(folder)}\``);
-  }
+  if (tag) lines.push(tag);
 
   return lines.join('\n');
 }
@@ -90,42 +134,30 @@ export function formatToolRequest({ id, toolName, toolInput, sessionId, cwd }) {
  */
 export function formatToolDetails({ toolName, toolInput }) {
   const parts = [];
-  parts.push(`🔧 Full details for ${toolName}:\n`);
 
   if (toolName === 'Bash' && toolInput?.command) {
-    parts.push('```bash');
-    parts.push(escapeMarkdown(truncate(toolInput.command, 2000)));
-    parts.push('```');
+    parts.push(`<pre><code class="language-bash">${escapeHtml(truncate(toolInput.command, 2000))}</code></pre>`);
   } else if (toolName === 'Edit' && toolInput) {
     if (toolInput.file_path) {
-      parts.push(`*File:* \`${escapeMarkdown(toolInput.file_path)}\`\n`);
+      parts.push(`<b>File:</b> <code>${escapeHtml(toolInput.file_path)}</code>\n`);
     }
     if (toolInput.old_string) {
-      parts.push('*Removing:*');
-      parts.push('```');
-      parts.push(escapeMarkdown(truncate(toolInput.old_string, 800)));
-      parts.push('```');
+      parts.push('<b>Removing:</b>');
+      parts.push(`<pre>${escapeHtml(truncate(toolInput.old_string, 800))}</pre>`);
     }
     if (toolInput.new_string) {
-      parts.push('*Adding:*');
-      parts.push('```');
-      parts.push(escapeMarkdown(truncate(toolInput.new_string, 800)));
-      parts.push('```');
+      parts.push('<b>Adding:</b>');
+      parts.push(`<pre>${escapeHtml(truncate(toolInput.new_string, 800))}</pre>`);
     }
   } else if (toolName === 'Write' && toolInput) {
     if (toolInput.file_path) {
-      parts.push(`*File:* \`${escapeMarkdown(toolInput.file_path)}\`\n`);
+      parts.push(`<b>File:</b> <code>${escapeHtml(toolInput.file_path)}</code>\n`);
     }
     if (toolInput.content) {
-      parts.push('*Content:*');
-      parts.push('```');
-      parts.push(escapeMarkdown(truncate(toolInput.content, 1500)));
-      parts.push('```');
+      parts.push(`<pre>${escapeHtml(truncate(toolInput.content, 1500))}</pre>`);
     }
   } else {
-    parts.push('```json');
-    parts.push(escapeMarkdown(truncate(JSON.stringify(toolInput, null, 2), 2000)));
-    parts.push('```');
+    parts.push(`<pre><code class="language-json">${escapeHtml(truncate(JSON.stringify(toolInput, null, 2), 2000))}</code></pre>`);
   }
 
   return parts.join('\n');
@@ -136,39 +168,48 @@ export function formatToolDetails({ toolName, toolInput }) {
  */
 export function formatNotification(data) {
   if (data.type === 'permission_prompt') {
-    return '⚠️ Claude is waiting for permission in the terminal\\.';
+    return '⚠️ Claude is waiting for permission in the terminal.';
   }
-  return `🔔 Notification: \`${escapeMarkdown(data.type || 'unknown')}\``;
+  return `🔔 <code>${escapeHtml(data.type || 'unknown')}</code>`;
 }
 
 /**
  * Format a stop event
  */
 export function formatStop(data) {
-  return '✅ Claude finished and is waiting for your next prompt\\.';
+  return '✅ Claude finished and is waiting for your next prompt.';
 }
 
 /**
  * Format the pending queue as a status message
  */
-export function formatStatus(pendingList, isAutoApproving, approveUntil) {
+export function formatStatus(pendingList, isAutoApproving, approveUntil, paused) {
   const lines = [];
-  lines.push('📊 *Claude Remote Bridge Status*\n');
+  lines.push('<b>Claude Remote Bridge</b>\n');
+
+  if (paused) {
+    lines.push('⏸ <b>Paused</b> — requests fall back to terminal\n');
+  }
 
   if (isAutoApproving) {
     const remaining = Math.round((approveUntil - Date.now()) / 60000);
-    lines.push(`🟢 *Auto\\-approve mode:* ${remaining} min remaining\n`);
+    lines.push(`🟢 <b>Auto-approve:</b> ${remaining} min remaining\n`);
   }
 
   if (pendingList.length === 0) {
-    lines.push('✅ No pending approvals');
+    lines.push('No pending approvals.');
   } else {
-    lines.push(`⏳ *${pendingList.length} pending approval\\(s\\):*\n`);
+    lines.push(`<b>${pendingList.length} pending:</b>\n`);
     for (const item of pendingList) {
       const icon = TOOL_ICONS[item.toolName] || TOOL_ICONS.default;
-      lines.push(`${icon} \`${escapeMarkdown(item.toolName)}\` \\- ${item.age}s ago \\(\`${escapeMarkdown(item.id)}\`\\)`);
+      const color = sessionColor(item.sessionId);
+      const project = projectName(item.cwd);
+      const projectTag = project ? ` ${color} <code>${escapeHtml(project)}</code>` : '';
+      lines.push(`  ${icon} <code>${escapeHtml(item.toolName)}</code> — ${item.age}s ago${projectTag}`);
     }
   }
 
   return lines.join('\n');
 }
+
+export { escapeHtml, sessionColor, projectName, TOOL_ICONS };

@@ -3,6 +3,7 @@ import { spawn } from 'child_process';
 import {
   formatToolRequest,
   formatToolDetails,
+  formatCompactSummary,
   formatNotification,
   formatStop,
   formatStatus,
@@ -23,6 +24,9 @@ export class TelegramBridge {
     this.runSessionId = null;
     this.knownSessions = new Set();
     this.onShutdown = null;
+    this.pendingComment = null;
+    // Map approval ID -> { toolName, toolInput, cwd } for post-decision summary
+    this.approvalMeta = new Map();
   }
 
   async start() {
@@ -35,9 +39,10 @@ export class TelegramBridge {
       const msg = formatStatus(
         this.queue.list(),
         this.queue.isAutoApproving(),
-        this.queue.approveAllUntil
+        this.queue.approveAllUntil,
+        this.queue.paused
       );
-      await ctx.replyWithMarkdownV2(msg);
+      await ctx.reply(msg, { parse_mode: 'HTML' });
     });
 
     this.bot.command('approveall', async (ctx) => {
@@ -45,7 +50,6 @@ export class TelegramBridge {
       const args = ctx.message.text.split(' ');
       const minutes = parseInt(args[1], 10) || 30;
       this.queue.setApproveAll(minutes);
-      // Also approve anything currently pending
       const approved = this.queue.approveAllPending();
       await ctx.reply(
         `✅ Auto-approve enabled for ${minutes} minutes.\n` +
@@ -56,16 +60,16 @@ export class TelegramBridge {
     this.bot.command('stopapprove', async (ctx) => {
       if (String(ctx.chat.id) !== this.chatId) return;
       this.queue.clearApproveAll();
-      await ctx.reply('🛑 Auto-approve disabled. Requests will need manual approval.');
+      await ctx.reply('🛑 Auto-approve disabled.');
     });
 
     this.bot.command('pause', async (ctx) => {
       if (String(ctx.chat.id) !== this.chatId) return;
       this.queue.paused = !this.queue.paused;
       if (this.queue.paused) {
-        await ctx.reply('⏸ Bridge paused. Requests will fall back to terminal approval.');
+        await ctx.reply('⏸ Bridge paused. Requests fall back to terminal.');
       } else {
-        await ctx.reply('▶️ Bridge resumed. Requests will come to Telegram.');
+        await ctx.reply('▶️ Bridge resumed.');
       }
     });
 
@@ -85,7 +89,6 @@ export class TelegramBridge {
       await ctx.reply(`🚀 Running: ${instruction.slice(0, 200)}${instruction.length > 200 ? '...' : ''}`);
       console.log(`🚀 [Telegram] /run: ${instruction.slice(0, 100)}`);
 
-      // Run in background so the bot stays responsive to approve/deny buttons
       this._executeClaudeCommand(instruction)
         .then(async (result) => {
           const chunks = this._splitMessage(result, 4000);
@@ -114,7 +117,6 @@ export class TelegramBridge {
     this.bot.command('stop', async (ctx) => {
       if (String(ctx.chat.id) !== this.chatId) return;
       await ctx.reply('🛑 Shutting down bridge...');
-      // Give Telegram time to send the reply before we exit
       setTimeout(() => {
         if (this.onShutdown) this.onShutdown();
       }, 500);
@@ -122,27 +124,41 @@ export class TelegramBridge {
 
     this.bot.command('help', async (ctx) => {
       if (String(ctx.chat.id) !== this.chatId) return;
-      await ctx.reply(
-        '🤖 Claude Remote Bridge Commands:\n\n' +
-        '/run <instruction> — Send an instruction to Claude Code\n' +
-        '/cancel — Cancel a running /run command\n' +
-        '/status — Show pending approvals\n' +
-        '/approveall [min] — Auto-approve for N minutes (default 30)\n' +
-        '/stopapprove — Stop auto-approving\n' +
-        '/pause — Toggle pause (fall back to terminal)\n' +
-        '/stop — Shut down the bridge remotely\n' +
-        '/help — Show this message'
-      );
+      const help = [
+        '<b>Commands</b>',
+        '',
+        '/run &lt;instruction&gt; — Send instruction to Claude',
+        '/cancel — Cancel running command',
+        '/status — Show pending approvals',
+        '/approveall [min] — Auto-approve for N minutes',
+        '/stopapprove — Stop auto-approving',
+        '/pause — Toggle pause (fall back to terminal)',
+        '/stop — Shut down the bridge',
+      ];
+      await ctx.reply(help.join('\n'), { parse_mode: 'HTML' });
     });
 
     // --- Callback query handlers (inline buttons) ---
 
     this.bot.action(/^approve:(.+)$/, async (ctx) => {
       const id = ctx.match[1];
+      const meta = this.approvalMeta.get(id);
       const success = this.queue.respond(id, 'allow');
       if (success) {
-        const original = ctx.callbackQuery.message.text || '';
-        await ctx.editMessageText(`✅ ${original}`);
+        // Collapse message to compact one-liner + remove buttons
+        const summary = meta
+          ? formatCompactSummary(meta)
+          : 'Approved';
+        try {
+          await ctx.editMessageText(`✅ ${summary}`, {
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: [] },
+          });
+        } catch {
+          // Fallback if edit fails
+          await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+        }
+        this.approvalMeta.delete(id);
         await ctx.answerCbQuery('Approved');
       } else {
         await ctx.answerCbQuery('⚠️ Request expired or already handled');
@@ -151,10 +167,21 @@ export class TelegramBridge {
 
     this.bot.action(/^deny:(.+)$/, async (ctx) => {
       const id = ctx.match[1];
+      const meta = this.approvalMeta.get(id);
       const success = this.queue.respond(id, 'deny');
       if (success) {
-        const original = ctx.callbackQuery.message.text || '';
-        await ctx.editMessageText(`❌ ${original}`);
+        const summary = meta
+          ? formatCompactSummary(meta)
+          : 'Denied';
+        try {
+          await ctx.editMessageText(`❌ ${summary}`, {
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: [] },
+          });
+        } catch {
+          await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+        }
+        this.approvalMeta.delete(id);
         await ctx.answerCbQuery('Denied');
       } else {
         await ctx.answerCbQuery('⚠️ Request expired or already handled');
@@ -167,14 +194,59 @@ export class TelegramBridge {
       if (entry) {
         const details = formatToolDetails(entry);
         try {
-          await ctx.replyWithMarkdownV2(details);
+          await ctx.reply(details, { parse_mode: 'HTML' });
         } catch {
-          // Fallback to plain text if markdown fails
           await ctx.reply(JSON.stringify(entry.toolInput, null, 2).slice(0, 4000));
         }
         await ctx.answerCbQuery();
       } else {
         await ctx.answerCbQuery('⚠️ Request not found');
+      }
+    });
+
+    this.bot.action(/^comment:(.+)$/, async (ctx) => {
+      const id = ctx.match[1];
+      const entry = this.queue.get(id);
+      if (entry) {
+        this.pendingComment = { id, messageId: ctx.callbackQuery.message.message_id };
+        await ctx.reply('💬 Type your instructions below. This will reject the action and tell Claude what to do.');
+        await ctx.answerCbQuery('Type your instructions below');
+      } else {
+        await ctx.answerCbQuery('⚠️ Request expired or already handled');
+      }
+    });
+
+    // Capture text messages as comments when waiting for instructions
+    this.bot.on('text', async (ctx) => {
+      if (String(ctx.chat.id) !== this.chatId) return;
+      if (!this.pendingComment) return;
+      if (ctx.message.text.startsWith('/')) return;
+
+      const { id, messageId } = this.pendingComment;
+      this.pendingComment = null;
+
+      const instruction = ctx.message.text.trim();
+      const meta = this.approvalMeta.get(id);
+      const success = this.queue.respond(id, 'deny', `User instruction: ${instruction}`);
+      if (success) {
+        try {
+          const summary = meta
+            ? formatCompactSummary(meta)
+            : '';
+          await this.bot.telegram.editMessageText(
+            this.chatId,
+            messageId,
+            null,
+            `💬 ${summary}\n${instruction.slice(0, 200)}`,
+            { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
+          );
+        } catch {
+          // Original message may not be editable anymore
+        }
+        this.approvalMeta.delete(id);
+        await ctx.reply(`💬 Sent to Claude: "${instruction.slice(0, 200)}"`);
+      } else {
+        await ctx.reply('⚠️ That request already expired or was handled.');
       }
     });
 
@@ -191,20 +263,25 @@ export class TelegramBridge {
    * Send an approval request to the user
    */
   async sendApprovalRequest({ id, toolName, toolInput, sessionId, cwd }) {
+    // Store meta for compact summary after decision
+    this.approvalMeta.set(id, { toolName, toolInput, cwd });
+
     const message = formatToolRequest({ id, toolName, toolInput, sessionId, cwd });
     const keyboard = Markup.inlineKeyboard([
       Markup.button.callback('✅', `approve:${id}`),
       Markup.button.callback('❌', `deny:${id}`),
+      Markup.button.callback('💬', `comment:${id}`),
       Markup.button.callback('👁', `details:${id}`),
     ]);
 
     try {
       await this.bot.telegram.sendMessage(this.chatId, message, {
-        parse_mode: 'MarkdownV2',
+        parse_mode: 'HTML',
         ...keyboard,
       });
     } catch (err) {
-      // Fallback: try without markdown if formatting fails
+      // Fallback: try without HTML if formatting fails
+      console.error('HTML send failed, retrying plain:', err.message);
       const plainMessage = `${toolName}: ${JSON.stringify(toolInput).slice(0, 200)}`;
       await this.bot.telegram.sendMessage(this.chatId, plainMessage, keyboard);
     }
@@ -217,7 +294,7 @@ export class TelegramBridge {
     try {
       const message = formatNotification(data);
       await this.bot.telegram.sendMessage(this.chatId, message, {
-        parse_mode: 'MarkdownV2',
+        parse_mode: 'HTML',
       });
     } catch (err) {
       console.error('Failed to send notification:', err.message);
@@ -230,9 +307,7 @@ export class TelegramBridge {
   async sendStopNotification(data) {
     try {
       const message = formatStop(data);
-      await this.bot.telegram.sendMessage(this.chatId, message, {
-        parse_mode: 'MarkdownV2',
-      });
+      await this.bot.telegram.sendMessage(this.chatId, message);
     } catch (err) {
       console.error('Failed to send stop notification:', err.message);
     }
@@ -247,9 +322,6 @@ export class TelegramBridge {
   }
 
   /**
-   * Execute a claude command and return the output
-   */
-  /**
    * Track a session_id as known (called on every hook request).
    */
   trackSession(sessionId) {
@@ -258,14 +330,10 @@ export class TelegramBridge {
 
   /**
    * Check if a request belongs to the active /run command.
-   * After /run spawns claude, the first request with an unknown session_id
-   * is identified as the /run session (all other sessions are already tracked).
    */
   isRunSession(sessionId) {
     if (!this.runningProcess || !sessionId) return false;
-    // Already identified
     if (this.runSessionId) return this.runSessionId === sessionId;
-    // First unknown session after /run started = the /run session
     if (!this.knownSessions.has(sessionId)) {
       this.runSessionId = sessionId;
       console.log(`  🔗 Captured /run session: ${sessionId.slice(0, 8)}`);
@@ -278,7 +346,7 @@ export class TelegramBridge {
     return new Promise((resolve, reject) => {
       const proc = spawn('claude', ['-p', '--output-format', 'text', instruction], {
         stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: 600000, // 10 min max
+        timeout: 600000,
       });
 
       this.runningProcess = proc;
@@ -288,15 +356,19 @@ export class TelegramBridge {
       proc.stdout.on('data', (data) => { stdout += data.toString(); });
       proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
-      proc.on('close', (code) => {
+      proc.on('close', (code, signal) => {
         this.runningProcess = null;
         this.runSessionId = null;
         if (code === 0) {
           resolve(stdout.trim() || '(no output)');
-        } else if (code === null) {
-          reject(new Error('Command was cancelled'));
+        } else if (code === null || signal) {
+          const sig = signal || 'unknown signal';
+          reject(new Error(`Process killed by ${sig}`));
         } else {
-          reject(new Error(stderr.trim() || `Process exited with code ${code}`));
+          // Decode well-known signal exit codes (128 + signal number)
+          const signals = { 134: 'SIGABRT (crash/OOM)', 137: 'SIGKILL (OOM killer)', 139: 'SIGSEGV', 143: 'SIGTERM' };
+          const hint = signals[code] ? ` — ${signals[code]}` : '';
+          reject(new Error(stderr.trim() || `Process exited with code ${code}${hint}`));
         }
       });
 
@@ -312,9 +384,6 @@ export class TelegramBridge {
     });
   }
 
-  /**
-   * Split a long message into chunks for Telegram's 4096 char limit
-   */
   _splitMessage(text, maxLen = 4000) {
     if (text.length <= maxLen) return [text];
     const chunks = [];
@@ -324,7 +393,6 @@ export class TelegramBridge {
         chunks.push(remaining);
         break;
       }
-      // Try to split at a newline
       let splitAt = remaining.lastIndexOf('\n', maxLen);
       if (splitAt < maxLen * 0.5) splitAt = maxLen;
       chunks.push(remaining.slice(0, splitAt));
